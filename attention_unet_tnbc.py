@@ -53,83 +53,126 @@ class NucleiDataset(Dataset):
         return len(self.images)
 
     def __getitem__(self, idx):
-        img = np.expand_dims(self.images[idx], axis=0)  # Expand dims to add channel dimension
-        mask = np.expand_dims(self.masks[idx], axis=0)  # Expand dims to add channel dimension
+        img = np.expand_dims(self.images[idx], axis=0)
+        mask = np.expand_dims(self.masks[idx], axis=0)
         return torch.tensor(img), torch.tensor(mask)
 
 # ---------------------- Attention U-Net Model ----------------------
 
-class AttentionBlock(nn.Module):
-    def __init__(self, in_channels):
-        super(AttentionBlock, self).__init__()
-        self.query = nn.Conv2d(in_channels, in_channels, kernel_size=1)
-        self.key = nn.Conv2d(in_channels, in_channels, kernel_size=1)
-        self.value = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+class AttentionGate(nn.Module):
+    def __init__(self, F_g, F_l, F_int):
+        super(AttentionGate, self).__init__()
+        self.W_g = nn.Conv2d(F_g, F_int, kernel_size=1, stride=1, padding=0, bias=True)
+        self.W_x = nn.Conv2d(F_l, F_int, kernel_size=1, stride=1, padding=0, bias=True)
+        self.psi = nn.Conv2d(F_int, 1, kernel_size=1, stride=1, padding=0, bias=True)
+        self.relu = nn.ReLU(inplace=True)
+        self.sigmoid = nn.Sigmoid()
 
-    def forward(self, query, key, value):
-        query = self.query(query)
-        key = self.key(key)
-        value = self.value(value)
+    def forward(self, g, x):
+        g1 = self.W_g(g)
+        x1 = self.W_x(x)
+        psi = self.relu(g1 + x1)
+        psi = self.sigmoid(self.psi(psi))
+        return x * psi
 
-        attention_map = torch.matmul(query, key.transpose(1, 2))  # BxCxHxW -> BxC*HxW
-        attention_map = torch.softmax(attention_map, dim=-1)
-
-        output = torch.matmul(attention_map, value)  # BxCxHxW
-        output = torch.sigmoid(output)
-        return output
-
-
-class AttentionUNet(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(AttentionUNet, self).__init__()
-        self.encoder = nn.Sequential(
-            nn.Conv2d(in_channels, 64, kernel_size=3, padding=1),
+class ConvBlock(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super(ConvBlock, self).__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2)
+            nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True)
         )
-        self.att1 = AttentionBlock(64)
-        self.up1 = nn.ConvTranspose2d(64, 64, kernel_size=2, stride=2)
-
-        # Add more encoder and decoder blocks as per your architecture
-        self.decoder = nn.Conv2d(64, out_channels, kernel_size=1)
 
     def forward(self, x):
-        # Encoder forward pass
-        e1 = self.encoder(x)
-        
-        # Apply attention
-        attention_output = self.att1(e1, e1, e1)
-        
-        # Decoder forward pass (up-sample)
-        d1 = self.up1(attention_output)
-        
-        # Final output
-        output = self.decoder(d1)
-        
-        return output
+        return self.conv(x)
 
+class UpConv(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super(UpConv, self).__init__()
+        self.up = nn.ConvTranspose2d(in_ch, out_ch, kernel_size=2, stride=2)
 
+    def forward(self, x):
+        return self.up(x)
 
+class AttentionUNet(nn.Module):
+    def __init__(self):
+        super(AttentionUNet, self).__init__()
+
+        self.enc1 = ConvBlock(1, 64)
+        self.pool1 = nn.MaxPool2d(2)
+
+        self.enc2 = ConvBlock(64, 128)
+        self.pool2 = nn.MaxPool2d(2)
+
+        self.enc3 = ConvBlock(128, 256)
+        self.pool3 = nn.MaxPool2d(2)
+
+        self.middle = ConvBlock(256, 512)
+
+        self.up3 = UpConv(512, 256)
+        self.attn3 = AttentionGate(F_g=256, F_l=256, F_int=128)
+        self.dec3 = ConvBlock(256 * 2, 256)
+
+        self.up2 = UpConv(256, 128)
+        self.attn2 = AttentionGate(F_g=128, F_l=128, F_int=64)
+        self.dec2 = ConvBlock(128 * 2, 128)
+
+        self.up1 = UpConv(128, 64)
+        self.attn1 = AttentionGate(F_g=64, F_l=64, F_int=32)
+        self.dec1 = ConvBlock(64 * 2, 64)
+
+        self.final = nn.Conv2d(64, 1, kernel_size=1)
+
+    def forward(self, x):
+        e1 = self.enc1(x)
+        p1 = self.pool1(e1)
+
+        e2 = self.enc2(p1)
+        p2 = self.pool2(e2)
+
+        e3 = self.enc3(p2)
+        p3 = self.pool3(e3)
+
+        m = self.middle(p3)
+
+        up3 = self.up3(m)
+        attn3 = self.attn3(g=up3, x=e3)
+        d3 = self.dec3(torch.cat([up3, attn3], dim=1))
+
+        up2 = self.up2(d3)
+        attn2 = self.attn2(g=up2, x=e2)
+        d2 = self.dec2(torch.cat([up2, attn2], dim=1))
+
+        up1 = self.up1(d2)
+        attn1 = self.attn1(g=up1, x=e1)
+        d1 = self.dec1(torch.cat([up1, attn1], dim=1))
+
+        return torch.sigmoid(self.final(d1))
 
 # ---------------------- Training ----------------------
 
-# Training Function (simplified)
-def train_unet(model, train_loader, num_epochs):
+def train_unet(model, train_loader, num_epochs=10, lr=1e-3):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.to(device)
+    criterion = nn.BCELoss()
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+
     model.train()
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    
     for epoch in range(num_epochs):
-        for batch_idx, (img, target) in enumerate(train_loader):
+        total_loss = 0
+        for img, mask in train_loader:
+            img, mask = img.to(device), mask.to(device)
             optimizer.zero_grad()
             output = model(img)
-            loss = criterion(output, target)
+            loss = criterion(output, mask)
             loss.backward()
             optimizer.step()
-            
-            print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}')
-    
+            total_loss += loss.item()
+        print(f"Epoch {epoch+1}/{num_epochs}, Loss: {total_loss / len(train_loader):.4f}")
     return model
+
 # ---------------------- Prediction ----------------------
 
 def predict_unet(model, test_loader):
@@ -145,9 +188,10 @@ def predict_unet(model, test_loader):
 
 # ---------------------- Evaluation ----------------------
 
-def compute_metrics(y_true, y_pred):
-    y_true_flat = y_true.numpy().flatten()
-    y_pred_flat = y_pred.numpy().flatten()
+def compute_metrics(y_true, y_pred, threshold=0.5):
+    y_pred_binary = y_pred > threshold
+    y_true_flat = y_true.flatten()
+    y_pred_flat = y_pred_binary.flatten()
 
     TP = np.sum((y_true_flat == 1) & (y_pred_flat == 1))
     TN = np.sum((y_true_flat == 0) & (y_pred_flat == 0))
@@ -156,14 +200,14 @@ def compute_metrics(y_true, y_pred):
 
     precision = TP / (TP + FP + 1e-8)
     recall = TP / (TP + FN + 1e-8)
-    f1_score = 2 * precision * recall / (precision + recall + 1e-8)
     accuracy = (TP + TN) / (TP + TN + FP + FN + 1e-8)
+    f1_score = 2 * precision * recall / (precision + recall + 1e-8)
 
     return precision, recall, f1_score, accuracy
 
 # ---------------------- Visualization ----------------------
 
-def visualize_results(images, masks, predictions, num_samples=5, save_dir='results/unet'):
+def visualize_results(images, masks, predictions, num_samples=5, save_dir='results/attention_unet'):
     os.makedirs(save_dir, exist_ok=True)
     for i in range(min(num_samples, len(images))):
         plt.figure(figsize=(12, 4))
@@ -177,43 +221,40 @@ def visualize_results(images, masks, predictions, num_samples=5, save_dir='resul
         # Ground truth mask (binary)
         plt.subplot(1, 3, 2)
         plt.imshow(masks[i][0], cmap='gray')
-        plt.title('Ground Truth Mask')
+        plt.title('Ground Truth')
         plt.axis('off')
 
-        # Predicted mask
+        # Prediction (binarized output)
         plt.subplot(1, 3, 3)
-        plt.imshow(predictions[i][0], cmap='gray')
-        plt.title('Predicted Mask')
+        plt.imshow(predictions[i][0] > 0.5, cmap='gray')
+        plt.title('Prediction')
         plt.axis('off')
 
-        plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, f'{i}.png'))
-        plt.show()
+        plt.savefig(os.path.join(save_dir, f'prediction_result_{i}.png'))
+        plt.close()
 
-# ---------------------- Running the Code ----------------------
+# ---------------------- Main Execution ----------------------
 
-# Paths to your dataset
 image_dir = 'TNBC_Dataset_Compiled/Slide'
 mask_dir = 'TNBC_Dataset_Compiled/Masks'
 
-# Dataset and DataLoader
 dataset = NucleiDataset(image_dir, mask_dir)
-train_loader = DataLoader(dataset, batch_size=8, shuffle=True)
+train_size = int(0.8 * len(dataset))
+test_size = len(dataset) - train_size
+train_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, test_size])
 
-# Model
-model = AttentionUNet(in_channels=1, out_channels=1)
+train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
+test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
-# Training
-trained_model = train_unet(model, train_loader, num_epochs=10)
+attention_unet_model = AttentionUNet()
+attention_unet_model = train_unet(attention_unet_model, train_loader, num_epochs=20, lr=0.001)
 
-# Testing & Prediction
-test_loader = DataLoader(dataset, batch_size=1, shuffle=False)
-predictions = predict_unet(trained_model, test_loader)
+# Convert test_dataset to numpy for evaluation
+test_images = [x[0].numpy() for x in test_dataset]
+test_masks = [x[1].numpy() for x in test_dataset]
+predictions = predict_unet(attention_unet_model, test_loader)
 
-# Compute Metrics
-for i, (img, mask) in enumerate(dataset):
-    precision, recall, f1_score, accuracy = compute_metrics(mask, predictions[i])
-    print(f"Sample {i+1} -> Precision: {precision:.4f}, Recall: {recall:.4f}, F1-Score: {f1_score:.4f}, Accuracy: {accuracy:.4f}")
+precision, recall, f1, accuracy = compute_metrics(np.array(test_masks), predictions, threshold=0.5)
+print(f'Precision: {precision:.4f}, Recall: {recall:.4f}, F1-Score: {f1:.4f}, Accuracy: {accuracy:.4f}')
 
-# Visualize Results
-visualize_results(dataset.images, dataset.masks, predictions, num_samples=5)
+visualize_results(test_images, test_masks, predictions, num_samples=5)
