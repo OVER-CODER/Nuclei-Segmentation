@@ -186,7 +186,7 @@ def visualize_results(images, masks, preds, save_dir='results/dsb2018', num_samp
 
 if __name__ == '__main__':
     base_dir = "stage1_train"
-    dataset = DSB2018Dataset(base_dir, image_size=(64, 64))
+    dataset = DSB2018Dataset(base_dir, image_size=(128, 128))
     train_size = int(0.8 * len(dataset))
     test_size = len(dataset) - train_size
     train_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, test_size])
