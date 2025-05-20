@@ -15,47 +15,49 @@ import torch.nn.functional as F
 class NucleiDataset(Dataset):
     def __init__(self, image_dir, mask_dir, image_size=(128, 128)):
         self.image_size = image_size
-        self.images = []
-        self.masks = []
+        self.image_paths = []
+        self.mask_paths = []
         image_files = sorted(os.listdir(image_dir))
         mask_files = sorted(os.listdir(mask_dir))
 
         for img_file, mask_file in zip(image_files, mask_files):
             img_path = os.path.join(image_dir, img_file)
             mask_path = os.path.join(mask_dir, mask_file)
-
-            img = io.imread(img_path)
-            mask = io.imread(mask_path)
-
-            if img.ndim == 3 and img.shape[2] == 4:
-                img = img[:, :, :3]  # Drop alpha if RGBA
-
-            if mask.ndim == 3:
-                if mask.shape[2] == 4:
-                    mask = mask[:, :, :3]
-                mask = color.rgb2gray(mask)
-            elif mask.ndim == 2:
-                pass  # already grayscale
-
-            img_resized = resize(img, image_size, anti_aliasing=True)
-            if img_resized.ndim == 3:
-                img_gray = color.rgb2gray(img_resized)
-            else:
-                img_gray = img_resized
-
-            mask_resized = resize(mask, image_size, anti_aliasing=True)
-            mask_binary = mask_resized > 0.5
-
-            self.images.append(img_gray.astype(np.float32))
-            self.masks.append(mask_binary.astype(np.float32))
+            self.image_paths.append(img_path)
+            self.mask_paths.append(mask_path)
 
     def __len__(self):
-        return len(self.images)
+        return len(self.image_paths)
 
     def __getitem__(self, idx):
-        img = np.expand_dims(self.images[idx], axis=0)
-        mask = np.expand_dims(self.masks[idx], axis=0)
-        return torch.tensor(img), torch.tensor(mask)
+        img_path = self.image_paths[idx]
+        mask_path = self.mask_paths[idx]
+
+        img = io.imread(img_path)
+        mask = io.imread(mask_path)
+
+        if img.ndim == 3 and img.shape[2] == 4:
+            img = img[:, :, :3]  # Drop alpha if RGBA
+
+        if mask.ndim == 3:
+            if mask.shape[2] == 4:
+                mask = mask[:, :, :3]
+            mask = color.rgb2gray(mask)
+        elif mask.ndim == 2:
+            pass  # already grayscale
+
+        img_resized = resize(img, self.image_size, anti_aliasing=True)
+        if img_resized.ndim == 3:
+            img_gray = color.rgb2gray(img_resized)
+        else:
+            img_gray = img_resized
+
+        mask_resized = resize(mask, self.image_size, anti_aliasing=True)
+        mask_binary = mask_resized > 0.5
+
+        return torch.tensor(np.expand_dims(img_gray.astype(np.float32), axis=0)), \
+               torch.tensor(np.expand_dims(mask_binary.astype(np.float32), axis=0)), \
+               img, mask # Return original images for visualization
 
 # ---------------------- Attention U-Net Model ----------------------
 
@@ -162,11 +164,11 @@ def train_unet(model, train_loader, num_epochs=10, lr=1e-3):
     model.train()
     for epoch in range(num_epochs):
         total_loss = 0
-        for img, mask in train_loader:
-            img, mask = img.to(device), mask.to(device)
+        for img_tensor, mask_tensor, _, _ in train_loader:
+            img_tensor, mask_tensor = img_tensor.to(device), mask_tensor.to(device)
             optimizer.zero_grad()
-            output = model(img)
-            loss = criterion(output, mask)
+            output = model(img_tensor)
+            loss = criterion(output, mask_tensor)
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
@@ -179,12 +181,16 @@ def predict_unet(model, test_loader):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.eval()
     preds = []
+    original_images = []
+    ground_truth_masks = []
     with torch.no_grad():
-        for img, _ in test_loader:
-            img = img.to(device)
-            output = model(img).cpu().numpy()
+        for img_tensor, mask_tensor, original_img, original_mask in test_loader:
+            img_tensor = img_tensor.to(device)
+            output = model(img_tensor).cpu().numpy()
             preds.extend(output)
-    return np.array(preds)
+            original_images.extend(original_img)
+            ground_truth_masks.extend(original_mask)
+    return np.array(preds), original_images, ground_truth_masks
 
 # ---------------------- Evaluation ----------------------
 
@@ -207,21 +213,27 @@ def compute_metrics(y_true, y_pred, threshold=0.5):
 
 # ---------------------- Visualization ----------------------
 
-def visualize_results(images, masks, predictions, num_samples=5, save_dir='results/attention_unet'):
+def visualize_results(original_images, ground_truth_masks, predictions, num_samples=5, save_dir='results/attention_unet'):
     os.makedirs(save_dir, exist_ok=True)
-    for i in range(min(num_samples, len(images))):
-        plt.figure(figsize=(12, 4))
+    for i in range(min(num_samples, len(original_images))):
+        plt.figure(figsize=(15, 5))
 
-        # Original image in grayscale
+        # Original image
         plt.subplot(1, 3, 1)
-        plt.imshow(images[i][0], cmap='gray')
+        if original_images[i].ndim == 3:
+            plt.imshow(original_images[i])
+        else:
+            plt.imshow(original_images[i], cmap='gray')
         plt.title('Original Image')
         plt.axis('off')
 
-        # Ground truth mask (binary)
+        # Ground truth mask
         plt.subplot(1, 3, 2)
-        plt.imshow(masks[i][0], cmap='gray')
-        plt.title('Ground Truth')
+        if ground_truth_masks[i].ndim == 3:
+            plt.imshow(ground_truth_masks[i])
+        else:
+            plt.imshow(ground_truth_masks[i], cmap='gray')
+        plt.title('Ground Truth Mask')
         plt.axis('off')
 
         # Prediction (binarized output)
@@ -249,12 +261,14 @@ test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 attention_unet_model = AttentionUNet()
 attention_unet_model = train_unet(attention_unet_model, train_loader, num_epochs=20, lr=0.001)
 
-# Convert test_dataset to numpy for evaluation
-test_images = [x[0].numpy() for x in test_dataset]
-test_masks = [x[1].numpy() for x in test_dataset]
-predictions = predict_unet(attention_unet_model, test_loader)
+# Get predictions and original images for evaluation and visualization
+predictions, original_test_images, original_test_masks = predict_unet(attention_unet_model, test_loader)
 
-precision, recall, f1, accuracy = compute_metrics(np.array(test_masks), predictions, threshold=0.5)
+# Convert original masks to binary for metric calculation
+binary_original_test_masks = [resize(mask, (128, 128), anti_aliasing=True) > 0.5 for mask in original_test_masks]
+binary_original_test_masks_np = np.array([np.expand_dims(mask.astype(np.float32), axis=0) for mask in binary_original_test_masks])
+
+precision, recall, f1, accuracy = compute_metrics(binary_original_test_masks_np, predictions, threshold=0.5)
 print(f'Precision: {precision:.4f}, Recall: {recall:.4f}, F1-Score: {f1:.4f}, Accuracy: {accuracy:.4f}')
 
-visualize_results(test_images, test_masks, predictions, num_samples=5)
+visualize_results(original_test_images, original_test_masks, predictions, num_samples=5)

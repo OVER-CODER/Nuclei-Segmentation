@@ -11,8 +11,10 @@ from skimage.filters import sobel_h, sobel_v
 # ---------------------- Data Loading and Processing ----------------------
 
 def load_data(image_dir, mask_dir, image_size=(64, 64)):
-    images = []
-    masks = []
+    images_original = []
+    masks_original = []
+    images_processed = []
+    masks_processed = []
     image_files = sorted(os.listdir(image_dir))
     mask_files = sorted(os.listdir(mask_dir))
 
@@ -20,8 +22,11 @@ def load_data(image_dir, mask_dir, image_size=(64, 64)):
         img_path = os.path.join(image_dir, img_file)
         mask_path = os.path.join(mask_dir, mask_file)
 
-        img = io.imread(img_path)
-        mask = io.imread(mask_path)
+        img_original = io.imread(img_path)
+        mask_original = io.imread(mask_path)
+
+        img = img_original.copy()
+        mask = mask_original.copy()
 
         if img.ndim == 3 and img.shape[2] == 4:
             img = img[:, :, :3]
@@ -32,12 +37,14 @@ def load_data(image_dir, mask_dir, image_size=(64, 64)):
         mask_resized = resize(mask, image_size, anti_aliasing=True)
         mask_binary = mask_resized > 0.5
 
-        images.append(img_resized)
-        masks.append(mask_binary)
+        images_original.append(img_original)
+        masks_original.append(mask_original)
+        images_processed.append(img_resized)
+        masks_processed.append(mask_binary)
 
-    images = np.array(images)
-    images = (images - images.mean()) / (images.std() + 1e-8)  # Normalize
-    return images, np.array(masks)
+    images_processed = np.array(images_processed)
+    images_processed = (images_processed - images_processed.mean()) / (images_processed.std() + 1e-8)  # Normalize
+    return images_processed, np.array(masks_processed), images_original, masks_original
 
 # ---------------------- SCCR Model ----------------------
 
@@ -125,47 +132,59 @@ def compute_metrics(y_true, y_pred, threshold=0.5):
 
 # ---------------------- Visualization ----------------------
 
-def visualize_results(images, masks, predictions, num_samples=5, save_dir='results/sccr'):
+def visualize_results(original_images, original_masks, predictions, num_samples=5, save_dir='results/sccr'):
     os.makedirs(save_dir, exist_ok=True)
-    for i in range(min(num_samples, len(images))):
-        plt.figure(figsize=(12, 4))
+    for i in range(min(num_samples, len(original_images))):
+        plt.figure(figsize=(15, 5))
+
+        # Original image
         plt.subplot(1, 3, 1)
-        plt.imshow(images[i], cmap='gray')
+        if original_images[i].ndim == 3:
+            plt.imshow(original_images[i])
+        else:
+            plt.imshow(original_images[i], cmap='gray')
         plt.title('Original Image')
         plt.axis('off')
 
+        # Ground truth mask
         plt.subplot(1, 3, 2)
-        plt.imshow(masks[i], cmap='gray')
+        if original_masks[i].ndim == 3:
+            plt.imshow(original_masks[i])
+        else:
+            plt.imshow(original_masks[i], cmap='gray')
         plt.title('Ground Truth')
         plt.axis('off')
 
+        # Prediction (binarized output)
         plt.subplot(1, 3, 3)
         plt.imshow(predictions[i] > 0.5, cmap='gray')  # Binarize
         plt.title('Prediction')
         plt.axis('off')
 
-        plt.savefig(os.path.join(save_dir, f'prediction_result_3.png'))
+        plt.savefig(os.path.join(save_dir, f'prediction_result_3_{i}.png'))
         plt.close()
 
 # ---------------------- Main Execution ----------------------
 
-image_dir = 'TNBC_NucleiSegmentation/TNBC_NucleiSegmentation/Slide_05'
-mask_dir = 'TNBC_NucleiSegmentation/TNBC_NucleiSegmentation/GT_05'
+image_dir = 'TNBC_Dataset_Compiled/Slide'
+mask_dir = 'TNBC_Dataset_Compiled/Masks'
 
-images, masks = load_data(image_dir, mask_dir, image_size=(64, 64))
-split_index = int(0.8 * len(images))
-train_images, test_images = images[:split_index], images[split_index:]
-train_masks, test_masks = masks[:split_index], masks[split_index:]
+images_processed, masks_processed, images_original, masks_original = load_data(image_dir, mask_dir, image_size=(64, 64))
+split_index = int(0.8 * len(images_processed))
+train_images_processed, test_images_processed = images_processed[:split_index], images_processed[split_index:]
+train_masks_processed, test_masks_processed = masks_processed[:split_index], masks_processed[split_index:]
+train_images_original, test_images_original = images_original[:split_index], images_original[split_index:]
+train_masks_original, test_masks_original = masks_original[:split_index], masks_original[split_index:]
 
 filters, w, X_mean, X_std = train_sccr(
-    train_images, train_masks,
+    train_images_processed, train_masks_processed,
     num_filters=24, filter_size=5,
     alpha=0.0005, beta=0.1,
     num_iterations=100, learning_rate=0.001
 )
 
-predictions = predict(test_images, filters, w, X_mean, X_std)
-precision, recall, f1 = compute_metrics(test_masks, predictions, threshold=0.5)
+predictions = predict(test_images_processed, filters, w, X_mean, X_std)
+precision, recall, f1 = compute_metrics(test_masks_processed, predictions, threshold=0.5)
 print(f'Precision: {precision:.4f}, Recall: {recall:.4f}, F1-Score: {f1:.4f}')
 
-visualize_results(test_images, test_masks, predictions, num_samples=5)
+visualize_results(test_images_original, test_masks_original, predictions, num_samples=5)
