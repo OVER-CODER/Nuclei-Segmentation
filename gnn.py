@@ -398,16 +398,16 @@ if __name__ == '__main__':
     image_dir = 'TNBC_Dataset_Compiled/Slide'
     mask_dir = 'TNBC_Dataset_Compiled/Masks'
     image_size = (128, 128)
-    batch_size = 8
+    batch_size = 5
     num_epochs = 100 # Increased epochs
-    learning_rate = 1e-4 # Fine-tuned learning rate
+    learning_rate = 5e-5 # Fine-tuned learning rate
     feature_dim = 64 # Initial filters for encoder
     gnn_hidden_dim = 512
     num_gnn_layers = 2 # Reduced GNN layers for stability
     num_classes = 1
     graph_connectivity = '8-connectivity'
     use_gat = True # Use Graph Attention Network
-    gat_heads = 4
+    gat_heads = 8
 
     dataset = NucleiDataset(image_dir, mask_dir, image_size, augment=True)
     train_size = int(0.7 * len(dataset))
