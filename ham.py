@@ -162,14 +162,14 @@ class NucleiDataset(Dataset):
         mask = io.imread(mask_path)
 
         if img.ndim == 3 and img.shape[2] == 4:
-            img = img[:, :, :3]  # Drop alpha if RGBA
+            img = img[:, :, :3]
 
         if mask.ndim == 3:
             if mask.shape[2] == 4:
                 mask = mask[:, :, :3]
             mask = color.rgb2gray(mask)
         elif mask.ndim == 2:
-            pass  # already grayscale
+            pass
 
         img_resized = resize(img, self.image_size, anti_aliasing=True)
         if img_resized.ndim == 3:
@@ -180,9 +180,14 @@ class NucleiDataset(Dataset):
         mask_resized = resize(mask, self.image_size, anti_aliasing=True)
         mask_binary = mask_resized > 0.5
 
+        # CRUCIAL CHANGE: Resize the original images and masks too!
+        img_resized_orig = resize(img, self.image_size, anti_aliasing=True)
+        mask_resized_orig = resize(mask, self.image_size, anti_aliasing=True)
+
+
         return torch.tensor(np.expand_dims(img_gray.astype(np.float32), axis=0)), \
                torch.tensor(np.expand_dims(mask_binary.astype(np.float32), axis=0)), \
-               img, mask # Return original images for visualization
+               img_resized_orig, mask_resized_orig
 
 # ---------------------- Training ----------------------
 
