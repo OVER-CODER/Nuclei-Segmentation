@@ -39,8 +39,8 @@ class NucleiDatasetStardist(Dataset):
             img = img[:, :, :3]
         if img.ndim == 3:
             img = color.rgb2gray(img)
-        img = resize(img, self.image_size, anti_aliasing=True).astype(np.float32)
-        img = np.expand_dims(img, axis=-1) # Add channel dimension
+        img_resized = resize(img, self.image_size, anti_aliasing=True).astype(np.float32)
+        img_expanded = np.expand_dims(img_resized, axis=-1) # Add channel dimension
 
         if mask.ndim == 3:
             mask = color.rgb2gray(mask)
@@ -48,7 +48,7 @@ class NucleiDatasetStardist(Dataset):
         mask_binary = mask_resized > 0.5
         mask_instance = sklabel(mask_binary).astype(np.uint16)
 
-        return img, mask_instance
+        return img_expanded, mask_instance
 
 # ---------------------- Training StarDist ----------------------
 
@@ -82,7 +82,7 @@ def train_stardist(train_loader, val_loader, model_name='stardist_nuclei', n_ray
 
 def predict_stardist(model, test_loader):
     predictions = []
-    for img, _ in tqdm(test_loader):
+    for img, _ in tqdm(test_loader, desc="Predicting"):
         img_np = img.squeeze().numpy()
         img_norm = normalize(img_np, 0, 1)
         labels, details = model.predict_instances(img_norm)
@@ -114,7 +114,7 @@ def evaluate_stardist(ground_truth_masks, predictions, iou_threshold=0.5):
     precision = total_tp / (total_tp + total_fp + 1e-8)
     recall = total_tp / (total_tp + total_fn + 1e-8)
     f1_score = 2 * precision * recall / (precision + recall + 1e-8)
-    accuracy = (total_tp + np.sum((ground_truth_masks == 0) & (predictions == 0))) / (ground_truth_masks.size + 1e-8) # This pixel-wise accuracy is likely not meaningful for instance segmentation
+    accuracy = (total_tp + np.sum((np.array(ground_truth_masks) == 0) & (np.array(predictions) == 0))) / (np.array(ground_truth_masks).size + 1e-8) # This pixel-wise accuracy is likely not meaningful for instance segmentation
 
     return mean_iou, precision, recall, f1_score, accuracy
 
@@ -146,22 +146,25 @@ def visualize_stardist_results(images, ground_truth_masks, predictions, num_samp
 # ---------------------- Main Execution ----------------------
 
 if __name__ == '__main__':
-    image_dir = 'NucleiSegmentationDataset/all_images'
-    mask_dir = 'NucleiSegmentationDataset/merged_masks'
+    train_image_dir = 'NucleiSegmentationDataset/all_images'
+    train_mask_dir = 'NucleiSegmentationDataset/merged_masks'
+    test_image_dir = 'TestDataset/images'
+    test_mask_dir = 'TestDataset/masks'
+    val_image_dir = 'TestDataset/images'
+    val_mask_dir = 'TestDataset/masks'
 
-    dataset = NucleiDatasetStardist(image_dir, mask_dir, image_size=(256, 256))
-    train_size = int(0.7 * len(dataset))
-    val_size = int(0.15 * len(dataset))
-    test_size = len(dataset) - train_size - val_size
+    # Create datasets
+    train_dataset = NucleiDatasetStardist(train_image_dir, train_mask_dir, image_size=(256, 256))
+    val_dataset = NucleiDatasetStardist(val_image_dir, val_mask_dir, image_size=(256, 256))
+    test_dataset = NucleiDatasetStardist(test_image_dir, test_mask_dir, image_size=(256, 256))
 
-    train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, val_size, test_size])
-
+    # Create dataloaders
     train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
     # Train StarDist model
-    stardist_model = train_stardist(train_loader, val_loader, epochs=10, learning_rate=1e-4)
+    stardist_model = train_stardist(train_loader, val_loader, epochs=5, learning_rate=1e-4)
 
     # Predict on the test set
     test_images = np.array([item[0] for item in test_dataset])
