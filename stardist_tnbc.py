@@ -146,8 +146,8 @@ def visualize_stardist_results(images, ground_truth_masks, predictions, num_samp
 # ---------------------- Main Execution ----------------------
 
 if __name__ == '__main__':
-    image_dir = 'TNBC_Dataset_Compiled/Slide'
-    mask_dir = 'TNBC_Dataset_Compiled/Masks'
+    image_dir = 'NucleiSegmentationDataset/all_images'
+    mask_dir = 'NucleiSegmentationDataset/merged_masks'
 
     dataset = NucleiDatasetStardist(image_dir, mask_dir, image_size=(256, 256))
     train_size = int(0.7 * len(dataset))

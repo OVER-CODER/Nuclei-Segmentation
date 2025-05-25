@@ -251,8 +251,8 @@ def visualize_results(original_images, ground_truth_masks, predictions, num_samp
 # ---------------------- Main Execution ----------------------
 
 
-image_dir = 'TNBC_Dataset_Compiled/Slide'
-mask_dir = 'TNBC_Dataset_Compiled/Masks'
+image_dir = 'NucleiSegmentationDataset/all_images'
+mask_dir = 'NucleiSegmentationDataset/merged_masks'
 
 dataset = NucleiDataset(image_dir, mask_dir)
 train_size = int(0.8 * len(dataset))
