@@ -57,7 +57,8 @@ class NucleiDataset(Dataset):
 
         return torch.tensor(np.expand_dims(img_gray.astype(np.float32), axis=0)), \
                torch.tensor(np.expand_dims(mask_binary.astype(np.float32), axis=0)), \
-               img, mask # Return original images for visualization
+               resize(img, self.image_size, anti_aliasing=True), \
+               resize(mask, self.image_size, anti_aliasing=True) # Return resized original images for visualization
 
 # ---------------------- Residual U-Net (ResUNet) Model ----------------------
 
@@ -167,7 +168,7 @@ def train_unet(model, train_loader, num_epochs=10, lr=1e-3):
     model.train()
     for epoch in range(num_epochs):
         total_loss = 0
-        for img_tensor, mask_tensor, _, _ in train_loader:
+        for img_tensor, mask_tensor, _, _ in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}"):
             img_tensor, mask_tensor = img_tensor.to(device), mask_tensor.to(device)
             optimizer.zero_grad()
             output = model(img_tensor)
@@ -187,7 +188,7 @@ def predict_unet(model, test_loader):
     original_images = []
     ground_truth_masks = []
     with torch.no_grad():
-        for img_tensor, mask_tensor, original_img, original_mask in test_loader:
+        for img_tensor, mask_tensor, original_img, original_mask in tqdm(test_loader, desc="Predicting"):
             img_tensor = img_tensor.to(device)
             output = model(img_tensor).cpu().numpy()
             preds.extend(output)
@@ -250,29 +251,31 @@ def visualize_results(original_images, ground_truth_masks, predictions, num_samp
 
 # ---------------------- Main Execution ----------------------
 
+train_image_dir = 'NucleiSegmentationDataset/all_images'
+train_mask_dir = 'NucleiSegmentationDataset/merged_masks'
+test_image_dir = 'TestDataset/images'
+test_mask_dir = 'TestDataset/masks'
 
-image_dir = 'NucleiSegmentationDataset/all_images'
-mask_dir = 'NucleiSegmentationDataset/merged_masks'
+# Create training and test datasets
+train_dataset = NucleiDataset(train_image_dir, train_mask_dir)
+test_dataset = NucleiDataset(test_image_dir, test_mask_dir)
 
-dataset = NucleiDataset(image_dir, mask_dir)
-train_size = int(0.8 * len(dataset))
-test_size = len(dataset) - train_size
-train_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, test_size])
-
-train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
+# Create dataloaders
+train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True)
 test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
-resunet_model = ResUNet()
-resunet_model = train_unet(resunet_model, train_loader, num_epochs=20, lr=0.001)
+# Initialize model
+model = ResUNet(num_channels=1)
 
-# Get predictions and original images for evaluation and visualization
-predictions, original_test_images, original_test_masks = predict_unet(resunet_model, test_loader)
+# Train model on training dataset
+model = train_unet(model, train_loader, num_epochs=10, lr=1e-3)
 
-# Convert original masks to binary for metric calculation
-binary_original_test_masks = [resize(mask, (128, 128), anti_aliasing=True) > 0.5 for mask in original_test_masks]
-binary_original_test_masks_np = np.array([np.expand_dims(mask.astype(np.float32), axis=0) for mask in binary_original_test_masks])
+# Predict on test dataset
+preds, original_images, ground_truth_masks = predict_unet(model, test_loader)
 
-precision, recall, f1, accuracy = compute_metrics(binary_original_test_masks_np, predictions, threshold=0.5)
-print(f'Precision: {precision:.4f}, Recall: {recall:.4f}, F1-Score: {f1:.4f}, Accuracy: {accuracy:.4f}')
+# Evaluate predictions
+precision, recall, f1_score, accuracy = compute_metrics(np.array(ground_truth_masks) > 0.5, preds > 0.5)
+print(f"Precision: {precision:.4f}, Recall: {recall:.4f}, F1: {f1_score:.4f}, Accuracy: {accuracy:.4f}")
 
-visualize_results(original_test_images, original_test_masks, predictions, num_samples=5)
+# Visualize results
+visualize_results(original_images, ground_truth_masks, preds, num_samples=5)
