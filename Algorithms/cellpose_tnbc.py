@@ -4,7 +4,7 @@ from skimage import io, color
 from skimage.transform import resize
 import os
 from tqdm import tqdm
-from cellpose import models
+from smth import models
 import torch
 from torch.utils.data import Dataset, DataLoader
 
