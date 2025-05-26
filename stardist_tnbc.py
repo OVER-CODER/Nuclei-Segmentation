@@ -6,125 +6,148 @@ import os
 from tqdm import tqdm
 import torch
 from torch.utils.data import Dataset, DataLoader
-import torch.optim as optim
-import sys
-from stardist import models, data
+from stardist import models
 from stardist.models import Config2D
-from stardist.plot import render_label, render_label_pred
-from stardist.plot import random_label_cmap, draw_polygons
 from csbdeep.utils import normalize
 from stardist.matching import matching
 from skimage.measure import label as sklabel
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
 
-# ---------------------- Data Loading and Processing ----------------------
-
+# ---------------------- Dataset ----------------------
 class NucleiDatasetStardist(Dataset):
-    def __init__(self, image_dir, mask_dir, image_size=(256, 256)):
+    def __init__(self, image_dir, mask_dir, image_size=(128, 128), train=True):
         self.image_size = image_size
         self.image_files = sorted([os.path.join(image_dir, f) for f in os.listdir(image_dir)])
         self.mask_files = sorted([os.path.join(mask_dir, f) for f in os.listdir(mask_dir)])
-        assert len(self.image_files) == len(self.mask_files), "Number of images and masks should be the same."
+        assert len(self.image_files) == len(self.mask_files), "Mismatch in image and mask counts"
+        self.train = train
+        self.augment = self._get_augmentation(train)
 
     def __len__(self):
         return len(self.image_files)
 
     def __getitem__(self, idx):
-        img_path = self.image_files[idx]
-        mask_path = self.mask_files[idx]
+        img = io.imread(self.image_files[idx])
+        mask = io.imread(self.mask_files[idx])
 
-        img = io.imread(img_path)
-        mask = io.imread(mask_path)
-
+        # Handle channels for image
         if img.ndim == 3 and img.shape[2] == 4:
             img = img[:, :, :3]
         if img.ndim == 3:
             img = color.rgb2gray(img)
-        img_resized = resize(img, self.image_size, anti_aliasing=True).astype(np.float32)
-        img_expanded = np.expand_dims(img_resized, axis=-1) # Add channel dimension
+        img = img.astype(np.float32)
 
+        # Handle channels for mask
         if mask.ndim == 3:
             mask = color.rgb2gray(mask)
-        mask_resized = resize(mask, self.image_size, anti_aliasing=False, order=0, preserve_range=True)
-        mask_binary = mask_resized > 0.5
-        mask_instance = sklabel(mask_binary).astype(np.uint16)
+        mask = mask.astype(np.float32)
+        mask_binary = mask > 0.5
 
-        return img_expanded, mask_instance
+        # Resize image and mask to fixed size
+        img_resized = resize(img, self.image_size, anti_aliasing=True, preserve_range=True).astype(np.float32)
+        mask_resized = resize(mask_binary.astype(np.float32), self.image_size, order=0, preserve_range=True).astype(np.float32)
 
-# ---------------------- Training StarDist ----------------------
+        # Label instances in mask
+        mask_instance = sklabel(mask_resized > 0.5).astype(np.uint16)
 
-def train_stardist(train_loader, val_loader, model_name='stardist_nuclei', n_rays=32, epochs=10, learning_rate=1e-4):
+        # Expand dims to add channel axis: (H, W) -> (H, W, 1)
+        img_expanded = np.expand_dims(img_resized, axis=-1).astype(np.float32)
+
+        if self.augment and self.train:
+            augmented = self.augment(image=img_expanded, mask=mask_instance)
+            img_tensor = augmented['image']  # already tensor, shape (C, H, W)
+            mask_tensor = augmented['mask'].long()
+        else:
+            # Normalize image (mean=0, std=1) - do this explicitly since Albumentations Normalize is not applied
+            img_expanded = (img_expanded - img_expanded.mean()) / (img_expanded.std() + 1e-8)
+
+            # Convert to tensor with shape (C, H, W)
+            img_tensor = torch.tensor(img_expanded.transpose(2, 0, 1)).float()
+            mask_tensor = torch.tensor(mask_instance).long()
+
+        return img_tensor, mask_tensor
+
+    def _get_augmentation(self, train):
+        transform_list = []
+        if train:
+            transform_list += [
+                A.Resize(*self.image_size),
+                A.RandomScale(scale_limit=0.2, p=0.5),
+                A.Rotate(limit=30, p=0.5),
+                A.HorizontalFlip(p=0.5),
+                A.VerticalFlip(p=0.5),
+                A.ElasticTransform(alpha=1, sigma=5, p=0.3),
+                A.Normalize(mean=0.0, std=1.0),
+                ToTensorV2()
+            ]
+        else:
+            transform_list += [
+                A.Resize(*self.image_size),
+                A.Normalize(mean=0.0, std=1.0),
+                ToTensorV2()
+            ]
+        return A.Compose(transform_list)
+
+# ---------------------- Train ----------------------
+def train_stardist(train_loader, val_loader, model_name='stardist_nuclei', n_rays=64, epochs=5, learning_rate=1e-4, batch_size=8, unet_n_depth=4, unet_n_filter_base=32):
     config = Config2D(
         n_rays=n_rays,
-        n_channel_in=1,  # Assuming grayscale input images
+        n_channel_in=1,
         train_epochs=epochs,
         train_learning_rate=learning_rate,
-        train_batch_size=4, # Match your DataLoader batch size
-        # Add other configuration parameters as needed
+        train_batch_size=batch_size,
+        unet_n_depth=unet_n_depth,
+        unet_n_filter_base=unet_n_filter_base,
+        train_patch_size=(128, 128)
     )
-
     model = models.StarDist2D(config, name=model_name)
 
-    X_train = np.array([item[0] for item in train_loader.dataset])
-    Y_train = np.array([item[1] for item in train_loader.dataset])
-    X_val = np.array([item[0] for item in val_loader.dataset])
-    Y_val = np.array([item[1] for item in val_loader.dataset])
+    def preprocess(loader):
+        X, Y = [], []
+        for imgs, masks in loader:
+            for img, mask in zip(imgs, masks):
+                X.append(img[0].cpu().numpy())  # img shape (C, H, W), take channel 0
+                Y.append(mask.cpu().numpy())
+        return np.array(X), np.array(Y)
 
-    # Normalize images
-    X_train = [normalize(x, 0, 1) for x in X_train]
-    X_val = [normalize(x, 0, 1) for x in X_val]
+    X_train, Y_train = preprocess(train_loader)
+    X_val, Y_val = preprocess(val_loader)
 
-    model.train(X_train, Y_train, validation_data=(X_val, Y_val),
-                epochs=epochs) # Remove learning_rate here
-
+    model.train(X_train, Y_train, validation_data=(X_val, Y_val), epochs=epochs)
     return model
 
-# ---------------------- Prediction with StarDist ----------------------
-
+# ---------------------- Predict ----------------------
 def predict_stardist(model, test_loader):
     predictions = []
-    for img, _ in tqdm(test_loader, desc="Predicting"):
-        img_np = img.squeeze().numpy()
-        img_norm = normalize(img_np, 0, 1)
-        labels, details = model.predict_instances(img_norm)
+    for img, _ in tqdm(test_loader):
+        img_np = img.squeeze().cpu().numpy()
+        labels, _ = model.predict_instances(img_np)
         predictions.append(labels)
     return predictions
 
-# ---------------------- Evaluation (Instance Segmentation) ----------------------
-
+# ---------------------- Evaluate ----------------------
 def evaluate_stardist(ground_truth_masks, predictions, iou_threshold=0.5):
-    mean_iou = 0
-    total_tp = 0
-    total_fp = 0
-    total_fn = 0
+    mean_iou, tp, fp, fn = 0, 0, 0, 0
+    for gt_mask, pred_mask in zip(ground_truth_masks, predictions):
+        if gt_mask.max() > 0 or pred_mask.max() > 0:
+            stats = matching(gt_mask, pred_mask, thresh=iou_threshold)
+            mean_iou += getattr(stats, 'mean_iou', 0)
+            tp += stats.tp
+            fp += stats.fp
+            fn += stats.fn
     num_samples = len(ground_truth_masks)
+    mean_iou /= max(num_samples, 1)
+    precision = tp / (tp + fp + 1e-8)
+    recall = tp / (tp + fn + 1e-8)
+    f1 = 2 * precision * recall / (precision + recall + 1e-8)
+    return mean_iou, precision, recall, f1
 
-    for gt_inst, pred_inst in zip(ground_truth_masks, predictions):
-        if gt_inst.max() > 0 or pred_inst.max() > 0:
-            stats = matching(gt_inst, pred_inst, thresh=iou_threshold)
-            if stats is not None:
-                mean_iou += stats.mean_iou if hasattr(stats, 'mean_iou') else stats.iou.mean() if hasattr(stats, 'iou') and len(stats.iou) > 0 else 0
-
-                tp, fp, fn = stats.tp, stats.fp, stats.fn
-                total_tp += tp
-                total_fp += fp
-                total_fn += fn
-
-    mean_iou /= num_samples if num_samples > 0 else 0
-
-    precision = total_tp / (total_tp + total_fp + 1e-8)
-    recall = total_tp / (total_tp + total_fn + 1e-8)
-    f1_score = 2 * precision * recall / (precision + recall + 1e-8)
-    accuracy = (total_tp + np.sum((np.array(ground_truth_masks) == 0) & (np.array(predictions) == 0))) / (np.array(ground_truth_masks).size + 1e-8) # This pixel-wise accuracy is likely not meaningful for instance segmentation
-
-    return mean_iou, precision, recall, f1_score, accuracy
-
-# ---------------------- Visualization ----------------------
-
+# ---------------------- Visualize ----------------------
 def visualize_stardist_results(images, ground_truth_masks, predictions, num_samples=5, save_dir='results/stardist'):
     os.makedirs(save_dir, exist_ok=True)
     for i in range(min(num_samples, len(images))):
         plt.figure(figsize=(15, 5))
-
         plt.subplot(1, 3, 1)
         plt.imshow(images[i].squeeze(), cmap='gray')
         plt.title('Original Image')
@@ -132,54 +155,52 @@ def visualize_stardist_results(images, ground_truth_masks, predictions, num_samp
 
         plt.subplot(1, 3, 2)
         plt.imshow(ground_truth_masks[i], cmap='nipy_spectral')
-        plt.title('Ground Truth (Instance)')
+        plt.title('Ground Truth')
         plt.axis('off')
 
         plt.subplot(1, 3, 3)
         plt.imshow(predictions[i], cmap='nipy_spectral')
-        plt.title('StarDist Prediction (Instance)')
+        plt.title('StarDist Prediction')
         plt.axis('off')
 
         plt.savefig(os.path.join(save_dir, f'stardist_result_{i}.png'))
         plt.close()
 
-# ---------------------- Main Execution ----------------------
-
+# ---------------------- Main ----------------------
 if __name__ == '__main__':
-    train_image_dir = 'NucleiSegmentationDataset/all_images'
-    train_mask_dir = 'NucleiSegmentationDataset/merged_masks'
-    test_image_dir = 'TestDataset/images'
-    test_mask_dir = 'TestDataset/masks'
-    val_image_dir = 'TestDataset/images'
-    val_mask_dir = 'TestDataset/masks'
+    image_dir = 'NucleiSegmentationDataset/all_images'
+    mask_dir = 'NucleiSegmentationDataset/merged_masks'
 
-    # Create datasets
-    train_dataset = NucleiDatasetStardist(train_image_dir, train_mask_dir, image_size=(256, 256))
-    val_dataset = NucleiDatasetStardist(val_image_dir, val_mask_dir, image_size=(256, 256))
-    test_dataset = NucleiDatasetStardist(test_image_dir, test_mask_dir, image_size=(256, 256))
+    dataset = NucleiDatasetStardist(image_dir, mask_dir, image_size=(128, 128), train=True)
+    train_size = int(0.7 * len(dataset))
+    val_size = int(0.15 * len(dataset))
+    test_size = len(dataset) - train_size - val_size
 
-    # Create dataloaders
-    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
+    train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, val_size, test_size])
 
-    # Train StarDist model
-    stardist_model = train_stardist(train_loader, val_loader, epochs=5, learning_rate=1e-4)
+    train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True, num_workers=2, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False, num_workers=2, pin_memory=True)
+    test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=1)
 
-    # Predict on the test set
-    test_images = np.array([item[0] for item in test_dataset])
-    test_ground_truth_masks = np.array([item[1] for item in test_dataset])
-    stardist_predictions = predict_stardist(stardist_model, test_loader)
+    # Train
+    model = train_stardist(train_loader, val_loader, epochs=5, batch_size=8)
 
-    # Evaluate (using mean IoU for instance segmentation)
-    mean_iou, precision, recall, f1, accuracy = evaluate_stardist(test_ground_truth_masks, stardist_predictions, iou_threshold=0.5)
-    print(f'Mean IoU on test set: {mean_iou:.4f}')
-    print(f'Precision: {precision:.4f}, Recall: {recall:.4f}, F1-Score: {f1:.4f}, Accuracy: {accuracy:.4f}')
+    # Predict
+    predictions = predict_stardist(model, test_loader)
 
-    # Visualize results
-    visualize_stardist_results(test_images, test_ground_truth_masks, stardist_predictions, num_samples=5)
+    # Evaluate
+    gt_masks = []
+    for _, mask in test_loader:
+        gt_masks.append(mask.squeeze().cpu().numpy())
 
-    # Optionally save the trained model
-    model_save_path = 'stardist_nuclei_model.pth'
-    stardist_model.keras_model.save(model_save_path)
-    print(f'Trained StarDist model saved to: {model_save_path}')
+    mean_iou, precision, recall, f1 = evaluate_stardist(gt_masks, predictions)
+    print(f"Mean IoU: {mean_iou:.4f}, Precision: {precision:.4f}, Recall: {recall:.4f}, F1: {f1:.4f}")
+
+    # Visualize
+    imgs_for_viz = []
+    for img, _ in test_loader:
+        imgs_for_viz.append(img.squeeze().cpu().numpy())
+    visualize_stardist_results(imgs_for_viz, gt_masks, predictions)
+    
+    # image_dir = 'TNBC_Dataset_Compiled/Slide'
+    # mask_dir = 'TNBC_Dataset_Compiled/Masks'
