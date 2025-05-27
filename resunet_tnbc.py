@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import torch.nn.functional as F
+from sklearn.metrics import f1_score, jaccard_score, precision_score, recall_score, accuracy_score
 
 # ---------------------- Data Loading and Processing ----------------------
 
@@ -17,6 +18,7 @@ class NucleiDataset(Dataset):
         self.image_size = image_size
         self.image_paths = []
         self.mask_paths = []
+        self.image_filenames = []
         image_files = sorted(os.listdir(image_dir))
         mask_files = sorted(os.listdir(mask_dir))
 
@@ -25,6 +27,7 @@ class NucleiDataset(Dataset):
             mask_path = os.path.join(mask_dir, mask_file)
             self.image_paths.append(img_path)
             self.mask_paths.append(mask_path)
+            self.image_filenames.append(img_file)
 
     def __len__(self):
         return len(self.image_paths)
@@ -32,6 +35,7 @@ class NucleiDataset(Dataset):
     def __getitem__(self, idx):
         img_path = self.image_paths[idx]
         mask_path = self.mask_paths[idx]
+        img_filename = self.image_filenames[idx]
 
         img = io.imread(img_path)
         mask = io.imread(mask_path)
@@ -58,7 +62,8 @@ class NucleiDataset(Dataset):
         return torch.tensor(np.expand_dims(img_gray.astype(np.float32), axis=0)), \
                torch.tensor(np.expand_dims(mask_binary.astype(np.float32), axis=0)), \
                resize(img, self.image_size, anti_aliasing=True), \
-               resize(mask, self.image_size, anti_aliasing=True) # Return resized original images for visualization
+               resize(mask, self.image_size, anti_aliasing=True), \
+               img_filename
 
 # ---------------------- Residual U-Net (ResUNet) Model ----------------------
 
@@ -168,7 +173,7 @@ def train_unet(model, train_loader, num_epochs=10, lr=1e-3):
     model.train()
     for epoch in range(num_epochs):
         total_loss = 0
-        for img_tensor, mask_tensor, _, _ in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}"):
+        for img_tensor, mask_tensor, _, _, _ in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}"):
             img_tensor, mask_tensor = img_tensor.to(device), mask_tensor.to(device)
             optimizer.zero_grad()
             output = model(img_tensor)
@@ -184,36 +189,57 @@ def train_unet(model, train_loader, num_epochs=10, lr=1e-3):
 def predict_unet(model, test_loader):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.eval()
-    preds = []
+    predictions = []
     original_images = []
     ground_truth_masks = []
+    image_filenames = []
     with torch.no_grad():
-        for img_tensor, mask_tensor, original_img, original_mask in tqdm(test_loader, desc="Predicting"):
+        for img_tensor, mask_tensor, original_img, original_mask, filename in tqdm(test_loader, desc="Predicting"):
             img_tensor = img_tensor.to(device)
             output = model(img_tensor).cpu().numpy()
-            preds.extend(output)
+            predictions.append((output[0], filename[0]))
             original_images.extend(original_img)
             ground_truth_masks.extend(original_mask)
-    return np.array(preds), original_images, ground_truth_masks
+            image_filenames.extend(filename)
+    return predictions, original_images, ground_truth_masks, image_filenames
 
 # ---------------------- Evaluation ----------------------
 
-def compute_metrics(y_true, y_pred, threshold=0.5):
-    y_pred_binary = y_pred > threshold
-    y_true_flat = y_true.flatten()
-    y_pred_flat = y_pred_binary.flatten()
+def evaluate_predictions(predictions, gt_masks):
+    dice_scores = []
+    iou_scores = []
+    precisions = []
+    recalls = []
+    accuracies = []
 
-    TP = np.sum((y_true_flat == 1) & (y_pred_flat == 1))
-    TN = np.sum((y_true_flat == 0) & (y_pred_flat == 0))
-    FP = np.sum((y_true_flat == 0) & (y_pred_flat == 1))
-    FN = np.sum((y_true_flat == 1) & (y_pred_flat == 0))
+    for pred_mask, fname in predictions:
+        gt_mask = gt_masks.get(fname)
+        if gt_mask is None:
+            print(f"Ground truth for {fname} not found.")
+            continue
 
-    precision = TP / (TP + FP + 1e-8)
-    recall = TP / (TP + FN + 1e-8)
-    accuracy = (TP + TN) / (TP + TN + FP + FN + 1e-8)
-    f1_score = 2 * precision * recall / (precision + recall + 1e-8)
+        pred_mask_binary = (pred_mask > 0.5).flatten().astype(np.uint8)
+        gt_mask_array = gt_mask.cpu().numpy()
+        gt_mask_binary = (gt_mask_array > 0.5).flatten().astype(np.uint8)
 
-    return precision, recall, f1_score, accuracy
+        dice = f1_score(gt_mask_binary, pred_mask_binary)
+        iou = jaccard_score(gt_mask_binary, pred_mask_binary)
+        precision = precision_score(gt_mask_binary, pred_mask_binary, zero_division=0)
+        recall = recall_score(gt_mask_binary, pred_mask_binary, zero_division=0)
+        accuracy = accuracy_score(gt_mask_binary, pred_mask_binary)
+
+        dice_scores.append(dice)
+        iou_scores.append(iou)
+        precisions.append(precision)
+        recalls.append(recall)
+        accuracies.append(accuracy)
+
+    print("\nEvaluation Metrics:")
+    print(f"Dice Score (F1):  {np.mean(dice_scores):.4f}")
+    print(f"IoU Score:        {np.mean(iou_scores):.4f}")
+    print(f"Precision:        {np.mean(precisions):.4f}")
+    print(f"Recall:           {np.mean(recalls):.4f}")
+    print(f"Accuracy:         {np.mean(accuracies):.4f}")
 
 # ---------------------- Visualization ----------------------
 
@@ -224,19 +250,21 @@ def visualize_results(original_images, ground_truth_masks, predictions, num_samp
 
         # Original image
         plt.subplot(1, 3, 1)
-        if original_images[i].ndim == 3:
-            plt.imshow(original_images[i])
+        img_to_plot = original_images[i].squeeze(0)
+        if img_to_plot.ndim == 3:
+            plt.imshow(img_to_plot)
         else:
-            plt.imshow(original_images[i], cmap='gray')
+            plt.imshow(img_to_plot, cmap='gray')
         plt.title('Original Image')
         plt.axis('off')
 
         # Ground truth mask
         plt.subplot(1, 3, 2)
-        if ground_truth_masks[i].ndim == 3:
-            plt.imshow(ground_truth_masks[i])
+        mask_to_plot = ground_truth_masks[i].squeeze(0)
+        if mask_to_plot.ndim == 3:
+            plt.imshow(mask_to_plot)
         else:
-            plt.imshow(ground_truth_masks[i], cmap='gray')
+            plt.imshow(mask_to_plot, cmap='gray')
         plt.title('Ground Truth Mask')
         plt.axis('off')
 
@@ -271,11 +299,15 @@ model = ResUNet(num_channels=1)
 model = train_unet(model, train_loader, num_epochs=10, lr=1e-3)
 
 # Predict on test dataset
-preds, original_images, ground_truth_masks = predict_unet(model, test_loader)
+preds, original_images, ground_truth_masks, test_filenames = predict_unet(model, test_loader)
+
+# Prepare ground truth masks for evaluation
+gt_masks_for_eval = {}
+for mask, filename in zip(ground_truth_masks, test_filenames):
+    gt_masks_for_eval[filename] = mask
 
 # Evaluate predictions
-precision, recall, f1_score, accuracy = compute_metrics(np.array(ground_truth_masks) > 0.5, preds > 0.5)
-print(f"Precision: {precision:.4f}, Recall: {recall:.4f}, F1: {f1_score:.4f}, Accuracy: {accuracy:.4f}")
+evaluate_predictions(preds, gt_masks_for_eval)
 
 # Visualize results
 visualize_results(original_images, ground_truth_masks, preds, num_samples=5)
