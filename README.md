@@ -20,12 +20,12 @@ It enhances the standard Residual U-Net by incorporating **multi-scale feature e
 
 ### 🔹 Overall SENLA-ResUNet  
 <p align="center">  
-  <img src="docs/senla_resunet_overview.png" alt="SENLA-ResUNet Architecture" width="700"/>  
+  <img src="Docs/senla_resunet_overview.png" alt="SENLA-ResUNet Architecture" width="700"/>  
 </p>  
 
 ### 🔹 Encoder Attention Module  
 <p align="center">  
-  <img src="docs/encoder_attention_module.png" alt="Encoder Attention Module" width="600"/>  
+  <img src="Docs/encoder_attention_module.png" alt="Encoder Attention Module" width="600"/>  
 </p>  
 
 ---
