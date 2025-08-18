@@ -10,13 +10,6 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import torch.nn.functional as F
 from sklearn.metrics import f1_score, jaccard_score, precision_score, recall_score, accuracy_score
-import warnings
-
-# Ignore the UndefinedMetricWarning
-warnings.filterwarnings("ignore", category=UserWarning)
-warnings.filterwarnings("ignore", category=RuntimeWarning)
-warnings.filterwarnings("ignore", category=FutureWarning)
-warnings.filterwarnings("ignore", category=UndefinedMetricWarning)
 
 # ---------------------- Data Loading and Processing ----------------------
 
