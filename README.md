@@ -1,5 +1,7 @@
 # SENLA-ResUNet: Hybrid Residual U-Net with Attention for Nuclei Segmentation  
 
+![](https://github.com/OVER-CODER/Nuclei-Segmentation/raw/main/results/Senla-Final.png)
+
 **SENLA-ResUNet** is a novel deep learning architecture designed for **accurate nuclei segmentation** in biomedical images.  
 It enhances the standard Residual U-Net by incorporating **multi-scale feature extraction, channel-wise recalibration, and global attention mechanisms**, achieving **state-of-the-art performance** on challenging datasets like **DSB2018** and **TNBC**.  
 
